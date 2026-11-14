@@ -85,7 +85,7 @@ const features = [
   },
   {
     title: "Movie night, synced",
-    body: "Share a YouTube link and watch together. Either of you can play, pause or seek — both screens stay on the same frame.",
+    body: "Share a video link from YouTube, Vimeo, Dailymotion or a direct file and watch together. Either of you can play, pause or seek — both screens stay on the same frame.",
     icon: FilmIcon,
     tone: "from-rose-500 to-fuchsia-600",
   },
@@ -211,8 +211,8 @@ export function Landing() {
 
             <p className="mt-6 max-w-xl text-[15px] leading-relaxed text-slate-600 sm:text-base dark:text-violet-100/60">
               Spin up an encrypted chat in one tap. Share a single link, skip the
-              sign-up, and chat, hop on a video call, or watch a YouTube video
-              together. The key never leaves your browser.
+              sign-up, and chat, hop on a video call, or watch a video together.
+              The key never leaves your browser.
             </p>
 
             <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">

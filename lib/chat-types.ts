@@ -25,9 +25,12 @@ export type SecretPayload = {
  * Shared movie state. `position` is the playback cursor at `updatedAt`
  * (server clock); the relay also sends a freshly computed `serverTime` so
  * clients can start from "now" without trusting their own clock.
+ *
+ * `source` is a compact video key (yt:…, vimeo:…, dm:…, file:<url>,
+ * embed:<url>) produced by lib/video.ts.
  */
 export type WatchState = {
-  videoId: string;
+  source: string;
   playing: boolean;
   position: number;
   updatedAt: number;

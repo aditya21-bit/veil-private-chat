@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   AlertIcon,
@@ -11,106 +11,25 @@ import {
   PauseIcon,
   PlayIcon,
   RefreshIcon,
-  Spinner,
 } from "@/components/icons";
+import {
+  DailymotionStage,
+  EmbedStage,
+  NativeVideoStage,
+  VimeoStage,
+  YouTubeStage,
+  type PlayerAdapter,
+} from "@/components/chat/watch-stages";
 import type { WatchEvent } from "@/lib/chat-types";
 import { cn } from "@/lib/cn";
-import { parseYouTubeVideoId } from "@/lib/youtube";
-
-/* -------------------------------------------------------------------------- */
-/* YouTube IFrame API                                                          */
-/* -------------------------------------------------------------------------- */
-
-type YTPlayer = {
-  playVideo: () => void;
-  pauseVideo: () => void;
-  seekTo: (seconds: number, allowSeekAhead: boolean) => void;
-  getCurrentTime: () => number;
-  getPlayerState: () => number;
-  destroy: () => void;
-};
-
-type YTConstructor = new (
-  element: HTMLElement,
-  options: {
-    videoId: string;
-    host?: string;
-    playerVars?: Record<string, string | number>;
-    events?: {
-      onReady?: () => void;
-      onStateChange?: (event: { data: number }) => void;
-      onError?: (event: { data: number }) => void;
-    };
-  },
-) => YTPlayer;
-
-declare global {
-  interface Window {
-    YT?: { Player: YTConstructor };
-    onYouTubeIframeAPIReady?: () => void;
-  }
-}
-
-let apiPromise: Promise<void> | null = null;
-
-function loadYouTubeApi(): Promise<void> {
-  if (typeof window === "undefined") return Promise.reject(new Error("no_window"));
-  if (window.YT?.Player) return Promise.resolve();
-  if (apiPromise) return apiPromise;
-
-  apiPromise = new Promise<void>((resolve, reject) => {
-    let settled = false;
-
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(timeout);
-      window.clearInterval(poll);
-      if (error) {
-        apiPromise = null;
-        reject(error);
-      } else {
-        resolve();
-      }
-    };
-
-    // The script can silently never call onYouTubeIframeAPIReady (blocked by
-    // an extension, a proxy, or a flaky network), so poll and time out.
-    const timeout = window.setTimeout(() => finish(new Error("yt_timeout")), 12_000);
-    const poll = window.setInterval(() => {
-      if (window.YT?.Player) finish();
-    }, 200);
-
-    const previous = window.onYouTubeIframeAPIReady;
-    window.onYouTubeIframeAPIReady = () => {
-      try {
-        previous?.();
-      } catch {
-        // Another callback failed; ours still needs to run.
-      }
-      finish();
-    };
-
-    if (document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.src = "https://www.youtube.com/iframe_api";
-    script.async = true;
-    script.onerror = () => {
-      script.remove();
-      finish(new Error("yt_load_failed"));
-    };
-    document.head.appendChild(script);
-  });
-
-  return apiPromise;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Panel                                                                      */
-/* -------------------------------------------------------------------------- */
+import {
+  parseVideoSource,
+  parseVideoSourceString,
+  serializeVideoSource,
+  videoSourceLabel,
+  videoSourcePageUrl,
+  type VideoSource,
+} from "@/lib/video";
 
 /** Seconds of playback applied to remote events to cover relay latency. */
 const REMOTE_BUFFER = 0.35;
@@ -118,22 +37,6 @@ const REMOTE_BUFFER = 0.35;
 const SEEK_THRESHOLD = 3;
 /** Ignore player events triggered by our own remote-apply calls. */
 const SUPPRESS_MS = 1800;
-
-function playerErrorCopy(code: number | null): string {
-  switch (code) {
-    case 2:
-      return "The video link didn't look right. Paste the full YouTube URL and try again.";
-    case 5:
-      return "YouTube's player couldn't start in this browser. Reload the player or try another video.";
-    case 100:
-      return "This video is private, removed, or unavailable in your region.";
-    case 101:
-    case 150:
-      return "The creator disabled embedding, so this one can only be watched on YouTube itself.";
-    default:
-      return "The creator may have blocked embedding, or YouTube's player didn't load. Reload it or open the video on YouTube.";
-  }
-}
 
 export function WatchPanel({
   state,
@@ -147,21 +50,18 @@ export function WatchPanel({
   state: WatchEvent | null;
   myClientId: string;
   peerName: string;
-  onStart: (videoId: string) => void;
-  onChange: (update: { videoId: string; playing: boolean; position: number }) => void;
+  onStart: (source: string) => void;
+  onChange: (update: { source: string; playing: boolean; position: number }) => void;
   onEnd: () => void;
   onHide: () => void;
 }) {
   const [draft, setDraft] = useState("");
   const [inputError, setInputError] = useState("");
-  const [apiState, setApiState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [playerError, setPlayerError] = useState<string | null>(null);
   const [needsTap, setNeedsTap] = useState(false);
-  const [playerError, setPlayerError] = useState(false);
-  const [errorCode, setErrorCode] = useState<number | null>(null);
   const [retryKey, setRetryKey] = useState(0);
 
-  const mountRef = useRef<HTMLDivElement>(null);
-  const playerRef = useRef<YTPlayer | null>(null);
+  const playerRef = useRef<PlayerAdapter | null>(null);
   const stateRef = useRef<WatchEvent | null>(state);
   const onChangeRef = useRef(onChange);
   const baselineRef = useRef<{ position: number; playing: boolean; at: number } | null>(null);
@@ -172,37 +72,18 @@ export function WatchPanel({
   stateRef.current = state;
   onChangeRef.current = onChange;
 
-  const videoId = state?.videoId ?? null;
-
-  /* Make sure the iframe API is fetched only when we actually need it. */
-  useEffect(() => {
-    if (!videoId) {
-      setApiState("idle");
-      return;
-    }
-
-    let cancelled = false;
-    setApiState((current) => (current === "ready" ? current : "loading"));
-
-    loadYouTubeApi()
-      .then(() => {
-        if (!cancelled) setApiState("ready");
-      })
-      .catch(() => {
-        if (!cancelled) setApiState("error");
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [videoId, retryKey]);
+  const sourceKey = state?.source ?? null;
+  const source = useMemo<VideoSource | null>(
+    () => (sourceKey ? parseVideoSourceString(sourceKey) : null),
+    [sourceKey],
+  );
 
   const reportLocal = useCallback((playing: boolean, position: number) => {
     const current = stateRef.current;
     if (!current) return;
     baselineRef.current = { position, playing, at: Date.now() };
     onChangeRef.current({
-      videoId: current.videoId,
+      source: current.source,
       playing,
       position: Math.max(0, position),
     });
@@ -217,11 +98,15 @@ export function WatchPanel({
     const target = Math.max(0, next.position + (next.playing ? REMOTE_BUFFER : 0));
     suppressUntilRef.current = now + SUPPRESS_MS;
 
-    if (force || Math.abs(player.getCurrentTime() - target) > 1.2) {
-      player.seekTo(target, true);
+    try {
+      if (force || Math.abs(player.currentTime() - target) > 1.2) {
+        player.seek(target);
+      }
+      if (next.playing) player.play();
+      else player.pause();
+    } catch {
+      // The player may have been torn down between render and this call.
     }
-    if (next.playing) player.playVideo();
-    else player.pauseVideo();
 
     baselineRef.current = { position: target, playing: next.playing, at: now };
 
@@ -232,8 +117,8 @@ export function WatchPanel({
         const active = playerRef.current;
         if (!active) return;
         try {
-          const state = active.getPlayerState();
-          if (state !== 1 && state !== 3) setNeedsTap(true);
+          const current = active.playerState();
+          if (current !== 1 && current !== 3) setNeedsTap(true);
         } catch {
           setNeedsTap(true);
         }
@@ -243,67 +128,56 @@ export function WatchPanel({
     }
   }, []);
 
-  /* Mount / replace the player whenever the video changes. */
-  useEffect(() => {
-    const host = mountRef.current;
-    if (apiState !== "ready" || !videoId || !host) return;
-
-    const YT = window.YT;
-    if (!YT?.Player) return;
-
-    setPlayerError(false);
-    setErrorCode(null);
-    setNeedsTap(false);
-
-    const mount = document.createElement("div");
-    mount.className = "h-full w-full";
-    host.replaceChildren(mount);
-
-    const player = new YT.Player(mount, {
-      videoId,
-      playerVars: {
-        autoplay: 1,
-        rel: 0,
-        modestbranding: 1,
-        playsinline: 1,
-        enablejsapi: 1,
-        origin: window.location.origin,
-      },
-      events: {
-        onReady: () => {
-          playerRef.current = player;
-          applyRemote(stateRef.current, true);
-        },
-        onStateChange: (event) => {
-          if (Date.now() < suppressUntilRef.current) return;
-          const active = playerRef.current;
-          if (!active) return;
-
-          if (event.data === 1) reportLocal(true, active.getCurrentTime());
-          else if (event.data === 2) reportLocal(false, active.getCurrentTime());
-          else if (event.data === 0) reportLocal(false, 0);
-        },
-        onError: (event) => {
-          setPlayerError(true);
-          setErrorCode(typeof event?.data === "number" ? event.data : null);
-        },
-      },
-    });
-
-    playerRef.current = player;
-
-    return () => {
-      window.clearTimeout(tapTimerRef.current);
-      playerRef.current = null;
+  const handleReady = useCallback(
+    (adapter: PlayerAdapter | null) => {
+      playerRef.current = adapter;
       baselineRef.current = null;
-      try {
-        player.destroy();
-      } catch {
-        // The iframe may already be gone.
+
+      if (!adapter) {
+        window.clearTimeout(tapTimerRef.current);
+        setNeedsTap(false);
+        return;
       }
-      host.replaceChildren();
-    };
-  }, [apiState, videoId, applyRemote, reportLocal, retryKey]);
+
+      suppressUntilRef.current = Date.now() + 300;
+      applyRemote(stateRef.current, true);
+    },
+    [applyRemote],
+  );
+
+  const handleLocal = useCallback(
+    (playing: boolean, position: number) => {
+      if (Date.now() < suppressUntilRef.current) return;
+      reportLocal(playing, position);
+    },
+    [reportLocal],
+  );
+
+  const handleError = useCallback((message: string) => {
+    setPlayerError(message);
+    playerRef.current = null;
+    window.clearTimeout(tapTimerRef.current);
+    setNeedsTap(false);
+  }, []);
+
+  const retryPlayer = useCallback(() => {
+    setPlayerError(null);
+    setNeedsTap(false);
+    playerRef.current = null;
+    baselineRef.current = null;
+    setRetryKey((key) => key + 1);
+  }, []);
+
+  useEffect(() => {
+    return () => window.clearTimeout(tapTimerRef.current);
+  }, []);
+
+  /* A new video should never inherit the previous player's error overlay. */
+  useEffect(() => {
+    setPlayerError(null);
+    setNeedsTap(false);
+    baselineRef.current = null;
+  }, [sourceKey]);
 
   /* React to remote state; local echoes only refresh our baseline. */
   useEffect(() => {
@@ -321,28 +195,28 @@ export function WatchPanel({
     applyRemote(state);
   }, [state, myClientId, applyRemote]);
 
-  /* Catch seeks and play/pause taps made inside the YouTube iframe. */
+  /* Catch seeks and play/pause taps made inside the player. */
   useEffect(() => {
-    if (!videoId) return;
+    if (!sourceKey) return;
 
     const interval = window.setInterval(() => {
       const player = playerRef.current;
       if (!player) return;
       if (Date.now() < suppressUntilRef.current) return;
 
-      let ytState: number;
+      let playerState: number;
       let actual: number;
       try {
-        ytState = player.getPlayerState();
-        actual = player.getCurrentTime();
+        playerState = player.playerState();
+        actual = player.currentTime();
       } catch {
-        // The iframe was torn down between the timer firing and this call.
+        // The player was torn down between the timer firing and this call.
         return;
       }
-      if (ytState === 3 || ytState === -1 || ytState === 5) return;
+      if (playerState === 3 || playerState === -1 || playerState === 5) return;
 
       const baseline = baselineRef.current;
-      const playingNow = ytState === 1;
+      const playingNow = playerState === 1;
 
       if (!baseline) {
         baselineRef.current = { position: actual, playing: playingNow, at: Date.now() };
@@ -375,60 +249,65 @@ export function WatchPanel({
     }, 1200);
 
     return () => window.clearInterval(interval);
-  }, [videoId, reportLocal, myClientId]);
+  }, [sourceKey, reportLocal, myClientId]);
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const id = parseYouTubeVideoId(draft);
-    if (!id) {
-      setInputError("Paste a YouTube video link or an 11-character video id.");
+    const parsed = parseVideoSource(draft);
+    if (!parsed) {
+      setInputError(
+        "Paste a video link from YouTube, Vimeo, Dailymotion, or a direct MP4/WebM URL.",
+      );
       return;
     }
     setInputError("");
     setDraft("");
-    onStart(id);
+    onStart(serializeVideoSource(parsed));
   }
 
   function joinPlayback() {
     const player = playerRef.current;
     if (!player || !state) return;
     const target = state.position + REMOTE_BUFFER;
-    player.seekTo(target, true);
-    player.playVideo();
+    try {
+      player.seek(target);
+      player.play();
+    } catch {
+      // The player was torn down between render and click.
+    }
     baselineRef.current = { position: target, playing: true, at: Date.now() };
     suppressUntilRef.current = Date.now() + 600;
     setNeedsTap(false);
   }
 
-  /** Reliable play/pause that does not depend on the YouTube iframe chrome. */
+  /** Reliable play/pause that does not depend on the provider's chrome. */
   function togglePlayback() {
     const player = playerRef.current;
     if (!player || !state) return;
 
     try {
       if (state.playing) {
-        player.pauseVideo();
-        reportLocal(false, player.getCurrentTime());
+        player.pause();
+        reportLocal(false, player.currentTime());
       } else {
-        player.seekTo(state.position, true);
-        player.playVideo();
+        player.seek(state.position);
+        player.play();
         reportLocal(true, state.position);
         setNeedsTap(false);
       }
     } catch {
-      // The iframe was torn down between render and click.
+      // The player was torn down between render and click.
     }
   }
 
-  function retryPlayer() {
-    setPlayerError(false);
-    setErrorCode(null);
-    setNeedsTap(false);
-    if (apiState === "error") setApiState("loading");
-    setRetryKey((key) => key + 1);
-  }
-
-  const watchedUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : "";
+  const watchedUrl = source ? videoSourcePageUrl(source) : "";
+  const stageKey = `${sourceKey ?? "none"}:${retryKey}`;
+  const stageProps = {
+    onReady: handleReady,
+    onLocal: handleLocal,
+    onError: handleError,
+    onRetry: retryPlayer,
+  };
 
   return (
     <section
@@ -444,17 +323,19 @@ export function WatchPanel({
           <p className="flex items-center gap-1.5 text-[12.5px] font-semibold tracking-tight text-slate-900 dark:text-white">
             Watch together
             <span className="hidden items-center gap-1 rounded-full border border-rose-500/20 bg-rose-500/10 px-1.5 py-0.5 text-[8.5px] font-bold uppercase tracking-[0.12em] text-rose-600 sm:inline-flex dark:text-rose-300">
-              YouTube
+              {source ? videoSourceLabel(source) : "Video"}
             </span>
           </p>
           <p className="truncate text-[10.5px] text-slate-500 dark:text-violet-100/45">
             {state
-              ? `In sync with ${peerName || "your guest"} · either of you can pause or seek`
+              ? source?.kind === "embed"
+                ? `Playing in an embedded frame${peerName ? ` with ${peerName}` : ""} · sync isn't available`
+                : `In sync with ${peerName || "your guest"} · either of you can pause or seek`
               : "Paste a link and both screens follow the same playhead"}
           </p>
         </div>
 
-        {state && (
+        {state && source?.kind !== "embed" && (
           <button
             type="button"
             onClick={togglePlayback}
@@ -476,8 +357,8 @@ export function WatchPanel({
             href={watchedUrl}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label="Open this video on YouTube"
-            title="Open on YouTube"
+            aria-label="Open this video in a new tab"
+            title="Open video"
             className="hidden h-8 w-8 place-items-center rounded-full text-slate-500 transition hover:bg-violet-900/5 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 sm:grid dark:text-violet-100/50 dark:hover:bg-white/10 dark:hover:text-white"
           >
             <LinkIcon className="h-4 w-4" />
@@ -516,8 +397,8 @@ export function WatchPanel({
                   setDraft(event.target.value);
                   if (inputError) setInputError("");
                 }}
-                placeholder="https://youtube.com/watch?v=…"
-                aria-label="YouTube video link"
+                placeholder="Paste a video link (YouTube, Vimeo, MP4…)"
+                aria-label="Video link"
                 className="min-w-0 flex-1 bg-transparent py-1.5 text-[12.5px] text-slate-800 outline-none placeholder:text-slate-400 dark:text-violet-50 dark:placeholder:text-violet-100/30"
               />
             </div>
@@ -538,58 +419,55 @@ export function WatchPanel({
             )}
           >
             {inputError ||
-              "Only videos the creator allows to be embedded will play. The link is never stored on the server — only the video id is relayed."}
+              "YouTube, Vimeo, Dailymotion and direct MP4/WebM links stay in sync. Other sites can still play in an embedded frame."}
           </p>
         </form>
       ) : (
         <div className="px-3 pb-3 sm:px-5">
           <div className="relative mx-auto aspect-video w-full max-w-[72dvh] overflow-hidden rounded-xl bg-black shadow-lg shadow-violet-950/20 ring-1 ring-black/10 dark:ring-white/10">
-            <div ref={mountRef} className="absolute inset-0 [&_iframe]:h-full [&_iframe]:w-full" />
-
-            {apiState === "error" && (
-              <>
-                {/* The JS API failed (blocked script or strict privacy mode).
-                    A plain embed still plays; only frame-perfect sync is lost. */}
-                <iframe
-                  src={`https://www.youtube.com/embed/${videoId}?rel=0&modestbranding=1&playsinline=1`}
-                  title="YouTube player"
-                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
-                  allowFullScreen
-                  className="absolute inset-0 h-full w-full"
-                />
-                <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center p-2">
-                  <div className="pointer-events-auto flex items-center gap-2 rounded-full bg-black/75 px-3 py-1 text-[10px] font-medium text-violet-100/85 backdrop-blur">
-                    Playing without sync
-                    <button
-                      type="button"
-                      onClick={retryPlayer}
-                      className="rounded-full bg-white/15 px-2 py-0.5 font-semibold text-white transition hover:bg-white/25"
-                    >
-                      Retry sync
-                    </button>
-                  </div>
-                </div>
-              </>
+            {source?.kind === "youtube" && (
+              <YouTubeStage key={stageKey} source={source} {...stageProps} />
+            )}
+            {source?.kind === "file" && (
+              <NativeVideoStage key={stageKey} source={source} {...stageProps} />
+            )}
+            {source?.kind === "vimeo" && (
+              <VimeoStage key={stageKey} source={source} {...stageProps} />
+            )}
+            {source?.kind === "dailymotion" && (
+              <DailymotionStage key={stageKey} source={source} {...stageProps} />
+            )}
+            {source?.kind === "embed" && (
+              <EmbedStage key={stageKey} source={source} {...stageProps} />
             )}
 
-            {(apiState === "loading" || apiState === "idle") && !playerError && (
-              <div className="absolute inset-0 grid place-items-center bg-gradient-to-br from-[#120f24] to-[#05040c] text-violet-200">
-                <div className="flex flex-col items-center gap-2">
-                  <Spinner className="h-6 w-6" />
-                  <span className="text-[11px] font-medium">Loading the projector…</span>
+            {!source && (
+              <div className="absolute inset-0 z-20 grid place-items-center bg-gradient-to-br from-[#1a1024] to-[#05040c] px-6 text-center">
+                <div className="max-w-xs">
+                  <AlertIcon className="mx-auto h-6 w-6 text-amber-300" />
+                  <p className="mt-2 text-[12px] font-semibold text-white">
+                    This video link couldn&apos;t be opened
+                  </p>
+                  <button
+                    type="button"
+                    onClick={onEnd}
+                    className="mt-3 inline-flex h-8 items-center rounded-full bg-white px-3 text-[11px] font-semibold text-slate-900 transition hover:bg-white/90"
+                  >
+                    End video
+                  </button>
                 </div>
               </div>
             )}
 
             {playerError && (
-              <div className="absolute inset-0 grid place-items-center bg-gradient-to-br from-[#1a1024] to-[#05040c] px-6 text-center">
+              <div className="absolute inset-0 z-20 grid place-items-center bg-gradient-to-br from-[#1a1024] to-[#05040c] px-6 text-center">
                 <div className="max-w-xs">
                   <AlertIcon className="mx-auto h-6 w-6 text-amber-300" />
                   <p className="mt-2 text-[12px] font-semibold text-white">
                     This video can&apos;t be played here
                   </p>
                   <p className="mt-1 text-[10.5px] leading-relaxed text-violet-200/60">
-                    {playerErrorCopy(errorCode)}
+                    {playerError}
                   </p>
                   <div className="mt-3 flex items-center justify-center gap-2">
                     <button
@@ -606,15 +484,15 @@ export function WatchPanel({
                       rel="noopener noreferrer"
                       className="inline-flex h-8 items-center gap-1.5 rounded-full bg-white/10 px-3 text-[11px] font-semibold text-white transition hover:bg-white/20"
                     >
-                      Open on YouTube
+                      Open video
                     </a>
                   </div>
                 </div>
               </div>
             )}
 
-            {needsTap && !playerError && apiState === "ready" && (
-              <div className="absolute inset-0 grid place-items-center bg-black/55 backdrop-blur-[2px]">
+            {needsTap && !playerError && (
+              <div className="absolute inset-0 z-20 grid place-items-center bg-black/55 backdrop-blur-[2px]">
                 <button
                   type="button"
                   onClick={joinPlayback}

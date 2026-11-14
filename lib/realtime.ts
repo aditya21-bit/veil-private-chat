@@ -258,7 +258,7 @@ export function watchSnapshot(room: Room, now = Date.now()): WatchEvent | null {
 
   const elapsed = watch.playing ? (now - watch.updatedAt) / 1000 : 0;
   return {
-    videoId: watch.videoId,
+    source: watch.source,
     playing: watch.playing,
     position: clampPosition(watch.position + elapsed),
     updatedAt: now,
@@ -270,11 +270,11 @@ export function watchSnapshot(room: Room, now = Date.now()): WatchEvent | null {
 export function setWatch(
   room: Room,
   clientId: string,
-  input: { videoId: string; playing: boolean; position: number },
+  input: { source: string; playing: boolean; position: number },
 ): WatchEvent {
   const now = Date.now();
   room.watch = {
-    videoId: input.videoId,
+    source: input.source,
     playing: input.playing,
     position: clampPosition(input.position),
     updatedAt: now,

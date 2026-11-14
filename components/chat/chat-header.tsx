@@ -104,7 +104,7 @@ export function ChatHeader({
         <button
           type="button"
           onClick={onWatch}
-          aria-label={watchActive ? "Return to watch together" : "Watch together on YouTube"}
+          aria-label={watchActive ? "Return to watch together" : "Watch a video together"}
           title="Watch together"
           className={cn(
             "relative inline-flex h-9 items-center gap-1.5 rounded-full border px-2.5 text-[12.5px] font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-500/40 sm:px-3",

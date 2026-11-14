@@ -2,7 +2,7 @@
 
 A mobile-first, end-to-end encrypted chat app built with **Next.js 16 (App Router)**, **React 19**, **TypeScript**, **Tailwind CSS v4** and the browser's **Web Crypto API**.
 
-Open a room, send one link, and chat privately. No accounts, no phone numbers, no passwords — and no readable messages on the server. You can also paste a YouTube link and watch together with synced playback.
+Open a room, send one link, and chat privately. No accounts, no phone numbers, no passwords — and no readable messages on the server. You can also paste a video link from YouTube, Vimeo, Dailymotion or a direct MP4/WebM file and watch together with synced playback.
 
 ## Run it
 
@@ -27,7 +27,7 @@ npm run typecheck
 2. Choose a display name and enter the room.
 3. Press **Invite**, copy the link, and open it in a **second browser profile or a private/incognito window** (a normal second tab is fine too — each tab gets its own client id).
 4. Chat in both windows. Messages appear instantly over server-sent events.
-5. Press **Watch** in the room header, paste a YouTube link, and press **Start watching**. Either of you can play, pause or seek; both players follow.
+5. Press **Watch** in the room header, paste a video link, and press **Start watching**. Either of you can play, pause or seek; both players follow.
 
 To test the two-seat limit, open the same invite in a third profile.
 
@@ -51,7 +51,15 @@ The safety code matters: if someone could swap the link mid-flight, comparing th
 
 ## Watch together
 
-Paste a YouTube link into the **Watch** panel. Only the 11-character video id and a playback cursor are relayed, never the full URL or the page that contained it. The relay stores `{ videoId, playing, position, updatedAt, updatedBy }` alongside the room and broadcasts changes over the same SSE stream.
+Paste a video link into the **Watch** panel. The relay stores a compact source key plus a playback cursor and broadcasts changes over the same SSE stream. YouTube links keep the familiar 11-character id; other sources are stored as `vimeo:<id>`, `dm:<id>`, `file:<url>` or `embed:<url>`.
+
+Supported sources:
+
+- **YouTube** — native IFrame API, fully synced.
+- **Vimeo** — official Player.js API, fully synced (including unlisted `h=` hashes).
+- **Dailymotion** — official player API, fully synced.
+- **Direct video files** — MP4, WebM, Ogg, MOV, HLS/DASH where the browser supports them, synced through a native `<video>` element.
+- **Everything else** — rendered in an iframe when the site allows embedding. Those pages cannot expose a playback API, so the panel shows them without frame-level sync.
 
 - Either partner can play, pause or seek. The last person to touch playback is the sync leader.
 - A slow heartbeat (every 8 seconds) lets the other player recover from buffering drift.
@@ -61,8 +69,9 @@ Paste a YouTube link into the **Watch** panel. Only the 11-character video id an
 Limits worth knowing:
 
 - The video must allow embedding. Many full-length movies, premium titles and region-locked videos do not.
-- The server sees the video id and playback position. That is metadata, not message plaintext, but it does reveal what you are watching.
-- This is YouTube only. Netflix, Prime Video and other DRM services cannot be embedded or synced this way.
+- The server sees the video link and playback position. That is metadata, not message plaintext, but it does reveal what you are watching.
+- DRM services such as Netflix and Prime Video cannot be embedded or synced this way.
+- Generic embeds may refuse to load inside an iframe; the **Open video** link always opens the original page.
 - Sync is best-effort; a long buffering stall is corrected on the next heartbeat or user action.
 
 ## Video calls
@@ -81,7 +90,7 @@ Like the rest of the app, calls require **HTTPS or localhost** because browsers 
 - **One-tap room creation** and link-based joining, no sign-up.
 - **True E2EE** in the browser — AES-256-GCM, per-message IVs, room-bound AAD.
 - **Realtime messaging** via SSE with auto-reconnect, encrypted history snapshots and optimistic send states.
-- **Watch together**: paste a YouTube link and keep both players on the same frame. Either partner can play, pause or seek; the last person to touch playback becomes the sync leader and sends slow drift corrections.
+- **Watch together**: paste a YouTube, Vimeo, Dailymotion or direct video link and keep both players on the same frame. Either partner can play, pause or seek; the last person to touch playback becomes the sync leader and sends slow drift corrections.
 - **Video calls**: press **Call** for a peer-to-peer audio/video call. Media flows browser-to-browser over WebRTC (DTLS-SRTP); the relay only carries the offer/answer handshake. Mute, camera toggle, accept/decline and a call timer are built in.
 - **Two-person rooms** with a server-enforced capacity and live presence.
 - **Typing indicators**, day separators, message grouping, timestamps and send/retry states.
@@ -104,14 +113,15 @@ app/
   api/rooms/[roomId]/events/route.ts SSE stream: init, message, presence, typing
   api/rooms/[roomId]/messages/route.ts Encrypted envelope intake
   api/rooms/[roomId]/typing/route.ts Typing relay
-  api/rooms/[roomId]/watch/route.ts   Shared video id + playhead
+  api/rooms/[roomId]/watch/route.ts   Shared video source + playhead
   api/rooms/[roomId]/signal/route.ts  WebRTC offer/answer/hang-up relay
 components/
   landing/landing.tsx               Hero, steps, security, features, CTA
   landing/chat-preview.tsx          Decorative hero product shot
   chat/chat-room.tsx                Client state, crypto, SSE, optimistic sends
   chat/chat-header.tsx              Presence, watch, invite, security, theme
-  chat/watch-panel.tsx              YouTube player + two-way playback sync
+  chat/watch-panel.tsx              Video panel, source input + two-way playback sync
+  chat/watch-stages.tsx             YouTube, native, Vimeo, Dailymotion and embed players
   chat/call-panel.tsx               WebRTC audio/video call, mute, camera toggle
   chat/message-list.tsx             Bubbles, grouping, empty state, typing
   chat/composer.tsx                 Auto-growing input, emoji picker, send
@@ -124,6 +134,7 @@ lib/
   crypto.ts                         Key generation, AES-GCM, fingerprints, invites
   realtime.ts                       In-memory rooms, presence, SSE fan-out, call signals
   youtube.ts                        YouTube URL → video id parsing
+  video.ts                          Any video URL → compact source key
   chat-types.ts                     Shared client/server envelope + call signal types
   clipboard.ts                      Clipboard with a legacy fallback
   cn.ts                             Tiny class-name helper

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { clearWatch, getRoom, isValidRoomId, setWatch } from "@/lib/realtime";
-import { isYouTubeVideoId } from "@/lib/youtube";
+import { isValidVideoSource } from "@/lib/video";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -32,19 +32,19 @@ export async function POST(
 
   const body = (await request.json().catch(() => null)) as {
     clientId?: unknown;
-    videoId?: unknown;
+    source?: unknown;
     playing?: unknown;
     position?: unknown;
   } | null;
 
   const clientId = typeof body?.clientId === "string" ? body.clientId : "";
-  const videoId = typeof body?.videoId === "string" ? body.videoId : "";
+  const source = typeof body?.source === "string" ? body.source : "";
   const playing = body?.playing;
   const position = typeof body?.position === "number" ? body.position : NaN;
 
   if (
     !CLIENT_ID.test(clientId) ||
-    !isYouTubeVideoId(videoId) ||
+    !isValidVideoSource(source) ||
     typeof playing !== "boolean" ||
     !Number.isFinite(position) ||
     position < 0 ||
@@ -62,7 +62,7 @@ export async function POST(
   }
 
   const watch = setWatch(room, clientId, {
-    videoId,
+    source,
     playing,
     position,
   });

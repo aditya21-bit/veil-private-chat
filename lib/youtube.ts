@@ -1,8 +1,8 @@
 /**
  * YouTube link helpers.
  *
- * We only ever store the 11-character video id. The rest of a pasted URL is
- * discarded so both partners end up on exactly the same embed.
+ * Pulls the 11-character video id out of a pasted URL or share text. The
+ * generic source parser in lib/video.ts turns that id into `yt:<id>`.
  */
 
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;

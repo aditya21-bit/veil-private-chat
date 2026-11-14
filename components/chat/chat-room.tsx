@@ -103,7 +103,7 @@ export function ChatRoom({ roomId }: { roomId: string }) {
   const lastTypingRef = useRef(0);
   const previousCountRef = useRef(0);
   const watchInitializedRef = useRef(false);
-  const lastWatchVideoRef = useRef<string | null>(null);
+  const lastWatchSourceRef = useRef<string | null>(null);
   const callSeqRef = useRef(0);
 
   /* ---------------------------------------------------------------- */
@@ -280,7 +280,7 @@ export function ChatRoom({ roomId }: { roomId: string }) {
           setMessages((current) => mergeMessages(current, decoded));
           setParticipants(data.participants);
           setWatchState(data.watch ?? null);
-          lastWatchVideoRef.current = data.watch?.videoId ?? null;
+          lastWatchSourceRef.current = data.watch?.source ?? null;
           if (data.watch && !watchInitializedRef.current) setWatchOpen(true);
           watchInitializedRef.current = true;
           setConnection("online");
@@ -339,8 +339,8 @@ export function ChatRoom({ roomId }: { roomId: string }) {
         const data = JSON.parse((event as MessageEvent).data) as WatchEvent | null;
         if (data && data.updatedBy === clientId) return;
         watchInitializedRef.current = true;
-        const isNewVideo = data ? data.videoId !== lastWatchVideoRef.current : false;
-        lastWatchVideoRef.current = data?.videoId ?? null;
+        const isNewVideo = data ? data.source !== lastWatchSourceRef.current : false;
+        lastWatchSourceRef.current = data?.source ?? null;
         setWatchState(data);
         // A partner's sync heartbeat must not reopen a panel the user hid.
         if (data && isNewVideo) setWatchOpen(true);
@@ -501,11 +501,11 @@ export function ChatRoom({ roomId }: { roomId: string }) {
   /* ---------------------------------------------------------------- */
 
   const startWatch = useCallback(
-    (videoId: string) => {
+    (source: string) => {
       const now = Date.now();
-      lastWatchVideoRef.current = videoId;
+      lastWatchSourceRef.current = source;
       setWatchState({
-        videoId,
+        source,
         playing: true,
         position: 0,
         updatedAt: now,
@@ -519,7 +519,7 @@ export function ChatRoom({ roomId }: { roomId: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           clientId,
-          videoId,
+          source,
           playing: true,
           position: 0,
         }),
@@ -532,16 +532,16 @@ export function ChatRoom({ roomId }: { roomId: string }) {
           if (data.watch) setWatchState(data.watch);
         })
         .catch(() => {
-          lastWatchVideoRef.current = null;
+          lastWatchSourceRef.current = null;
           setWatchState(null);
-          showToast("Couldn't start the movie. Check your connection.");
+          showToast("Couldn't start the video. Check your connection.");
         });
     },
     [clientId, roomId, showToast],
   );
 
   const changeWatch = useCallback(
-    (update: { videoId: string; playing: boolean; position: number }) => {
+    (update: { source: string; playing: boolean; position: number }) => {
       const now = Date.now();
       setWatchState({
         ...update,
@@ -562,7 +562,7 @@ export function ChatRoom({ roomId }: { roomId: string }) {
   );
 
   const endWatch = useCallback(() => {
-    lastWatchVideoRef.current = null;
+    lastWatchSourceRef.current = null;
     setWatchState(null);
     setWatchOpen(false);
 
